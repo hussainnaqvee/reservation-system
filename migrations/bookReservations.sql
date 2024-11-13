@@ -1,56 +1,60 @@
-CREATE PROCEDURE BookReservation
+    drop procedure BookReservation;
+
+    CREATE PROCEDURE BookReservation
+    @BusinessID INT,
     @CustomerName VARCHAR(50),
-    @PhoneNo VARCHAR(50),
-    @Capacity INT,
+    @CustomerPhoneNo VARCHAR(50),
+    @PartySize INT,
     @ReservationTime DATETIME,
-    @ReservationID INT OUTPUT
+    @ReservationID INT OUTPUT  -- Output parameter to return the ReservationID
 AS
 BEGIN
-    DECLARE @SlotID INT;
-    DECLARE @SlotCapacity INT;
-    DECLARE @EndTime DATETIME;
+    DECLARE @ReservationEndTime DATETIME = DATEADD(HOUR, 1, @ReservationTime); -- Assuming 1-hour reservation duration
+    DECLARE @BusinessStartTime TIME, @BusinessEndTime TIME;
+    DECLARE @SelectedSlotID INT = NULL;
 
-    SELECT TOP 1
-        @SlotID = S.SlotID,
-        @SlotCapacity = S.SlotCapacity,
-        @EndTime = AT.EndTime
-    FROM
-        AvailableTimeslots AT
-    JOIN
-        Slots S ON AT.SLOTID = S.SlotID
-    WHERE
-        AT.ENDTIME <= @ReservationTime
-        AND S.SlotCapacity >= @Capacity
-    ORDER BY
-        AT.EndTime ASC;
+    SELECT @BusinessStartTime = BusinessStartTime, @BusinessEndTime = BusinessEndTime
+    FROM Business
+    WHERE BusinessID = @BusinessID;
 
-    IF @SlotID IS NOT NULL
+    IF @BusinessStartTime IS NULL
+        BEGIN
+            print 'Could not Business timing(BusinessId null or Business Timings not defined)'
+            SET @ReservationID = 5000;
+            RETURN
+        END
+
+    -- Check if reservation time is within business hours
+    IF CONVERT(TIME, @ReservationTime) < @BusinessStartTime OR CONVERT(TIME, @ReservationEndTime) > @BusinessEndTime
     BEGIN
-        INSERT INTO Reservations (CustomerName, CustomerPhoneNo, PartySize, ReservationTime, AssignedTables)
-        VALUES (@CustomerName, @PhoneNo, @Capacity, @ReservationTime, CAST(@SlotID AS VARCHAR(50)));
+        PRINT 'Reservation time is outside business hours.';
+        SET @ReservationID = 5002;
+        RETURN;
+    END
 
+    SELECT TOP 1 @SelectedSlotID = s.SlotID
+    FROM Slots s
+    LEFT JOIN Reservations r
+        ON s.SlotID = r.SlotId
+        AND r.ReservationTimeEnd > @ReservationTime
+        AND r.ReservationTime < @ReservationEndTime
+    WHERE s.BusinessID = @BusinessID
+      AND s.SlotCapacity >= @PartySize
+      AND r.ReservationID IS NULL
+    ORDER BY s.SlotCapacity ASC;
+
+    IF @SelectedSlotID IS NOT NULL
+    BEGIN
+        INSERT INTO Reservations (CustomerName, CustomerPhoneNo, PartySize, ReservationTime, ReservationTimeEnd, SlotId)
+        VALUES (@CustomerName, @CustomerPhoneNo, @PartySize, @ReservationTime, @ReservationEndTime, @SelectedSlotID);
+
+        -- Retrieve the new ReservationID
         SET @ReservationID = SCOPE_IDENTITY();
-
-       UPDATE AvailableTimeslots SET StartTime = @ReservationTime, EndTime = DATEADD(HOUR, 1, @ReservationTime)
-        FROM AvailableTimeslots AS AT
-        WHERE AT.SLOTID = @SLOTID;
+        PRINT 'Reservation successfully booked.';
     END
     ELSE
     BEGIN
-        SET @ReservationID = -5002; -- not found
+        PRINT 'No available slot found matching the requested party size and time.';
+        SET @ReservationID = 5003;
     END
 END;
-
-
-
--- DECLARE @ReservationID INT;
---
--- EXEC BookReservation
---     @CustomerName = 'Muhammad Ali',
---     @PhoneNo = '+923005456780',
---     @Capacity = 2,
---     @ReservationTime = '2024-11-11 23:30:00',
---     @ReservationID = @ReservationID OUTPUT;
---
--- SELECT @ReservationID AS ReservationID;
-
