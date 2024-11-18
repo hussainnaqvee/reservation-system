@@ -1,60 +1,86 @@
-    drop procedure BookReservation;
-
-    CREATE PROCEDURE BookReservation
-    @BusinessID INT,
-    @CustomerName VARCHAR(50),
-    @CustomerPhoneNo VARCHAR(50),
+CREATE PROCEDURE BookReservation @CustomerName NVARCHAR(50),
+    @CustomerPhoneNo NVARCHAR(50),
     @PartySize INT,
     @ReservationTime DATETIME,
-    @ReservationID INT OUTPUT  -- Output parameter to return the ReservationID
+    @SlotId INT,
+    @ReservationId INT OUTPUT
 AS
 BEGIN
-    DECLARE @ReservationEndTime DATETIME = DATEADD(HOUR, 1, @ReservationTime); -- Assuming 1-hour reservation duration
-    DECLARE @BusinessStartTime TIME, @BusinessEndTime TIME;
-    DECLARE @SelectedSlotID INT = NULL;
+    SET
+NOCOUNT ON;
 
-    SELECT @BusinessStartTime = BusinessStartTime, @BusinessEndTime = BusinessEndTime
-    FROM Business
-    WHERE BusinessID = @BusinessID;
-
-    IF @BusinessStartTime IS NULL
-        BEGIN
-            print 'Could not Business timing(BusinessId null or Business Timings not defined)'
-            SET @ReservationID = 5000;
-            RETURN
-        END
-
-    -- Check if reservation time is within business hours
-    IF CONVERT(TIME, @ReservationTime) < @BusinessStartTime OR CONVERT(TIME, @ReservationEndTime) > @BusinessEndTime
-    BEGIN
-        PRINT 'Reservation time is outside business hours.';
-        SET @ReservationID = 5002;
+    -- Ensure reservation time is not in the past
+    IF
+@ReservationTime < GETDATE()
+BEGIN
+        RAISERROR
+('Reservation time cannot be in the past.', 16, 1);
         RETURN;
-    END
+END;
 
-    SELECT TOP 1 @SelectedSlotID = s.SlotID
-    FROM Slots s
-    LEFT JOIN Reservations r
-        ON s.SlotID = r.SlotId
-        AND r.ReservationTimeEnd > @ReservationTime
-        AND r.ReservationTime < @ReservationEndTime
-    WHERE s.BusinessID = @BusinessID
-      AND s.SlotCapacity >= @PartySize
-      AND r.ReservationID IS NULL
-    ORDER BY s.SlotCapacity ASC;
+    -- Validate SlotId existence
+    IF
+NOT EXISTS (SELECT 1 FROM Slots WHERE SlotID = @SlotId)
+BEGIN
+        RAISERROR
+('The specified SlotId does not exist.', 16, 1);
+        RETURN;
+END;
 
-    IF @SelectedSlotID IS NOT NULL
-    BEGIN
-        INSERT INTO Reservations (CustomerName, CustomerPhoneNo, PartySize, ReservationTime, ReservationTimeEnd, SlotId)
-        VALUES (@CustomerName, @CustomerPhoneNo, @PartySize, @ReservationTime, @ReservationEndTime, @SelectedSlotID);
+    -- Retrieve business's average serve time and buffer time
+    DECLARE
+@AverageServeTime INT;
+    DECLARE
+@BufferTime INT;
+SELECT @AverageServeTime = AverageServeTime,
+       @BufferTime = BufferTime
+FROM Business
+WHERE BusinessID = (SELECT BusinessID FROM Slots WHERE SlotID = @SlotId);
 
-        -- Retrieve the new ReservationID
-        SET @ReservationID = SCOPE_IDENTITY();
-        PRINT 'Reservation successfully booked.';
-    END
-    ELSE
-    BEGIN
-        PRINT 'No available slot found matching the requested party size and time.';
-        SET @ReservationID = 5003;
-    END
+-- Calculate ReservationTimeEnd by adding AverageServeTime and BufferTime
+DECLARE
+@ReservationTimeEnd DATETIME = DATEADD(MINUTE, @AverageServeTime + @BufferTime, @ReservationTime);
+
+    -- Check if the reservation time range is valid for the SlotId
+    IF
+EXISTS (
+        SELECT 1
+        FROM Reservations
+        WHERE SlotId = @SlotId
+        AND (
+            (@ReservationTime < ReservationTimeEnd AND @ReservationTimeEnd > ReservationTime) -- Overlapping time check
+        )
+    )
+BEGIN
+        RAISERROR
+('The selected time range is not available for the specified SlotId.', 16, 1);
+        RETURN;
+END;
+
+    -- Ensure PartySize does not exceed the slot's capacity
+    DECLARE
+@SlotCapacity INT;
+SELECT @SlotCapacity = SlotCapacity
+FROM Slots
+WHERE SlotID = @SlotId;
+
+IF
+@PartySize > @SlotCapacity
+BEGIN
+        RAISERROR
+('The party size exceeds the slot capacity.', 16, 1);
+        RETURN;
+END;
+
+    -- Insert the reservation
+INSERT INTO Reservations (CustomerName, CustomerPhoneNo, PartySize, ReservationTime, ReservationTimeEnd, SlotId)
+VALUES (@CustomerName, @CustomerPhoneNo, @PartySize, @ReservationTime, @ReservationTimeEnd, @SlotId);
+
+-- Retrieve the new ReservationId
+SET
+@ReservationId = SCOPE_IDENTITY();
+
+    -- Return success
+    PRINT
+'Reservation created successfully.';
 END;
